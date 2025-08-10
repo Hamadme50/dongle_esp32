@@ -83,6 +83,7 @@ class InverterSerial:
         self.devicedata = {}
         self.livedata = {}
         self.reset_state()
+        self._custom_answer_cache = None
 
     # ---------- lifecycle ----------
     def start(self):
@@ -338,10 +339,13 @@ class InverterSerial:
             ans = self.request_data(self._custom_cmd)
             alias = self._custom_name or self._custom_cmd
             if ans not in ('ERCRC','NAK'):
+                                # cache the custom answer (do not persist in livedata)
+                self._custom_answer_cache = ans
                 self._store_answer(alias, self._custom_cmd, ans, group='dynamic')
-                # prevent raw custom command key from persisting in livedata
+                # immediately remove custom keys from livedata
                 try:
-                    if self.keep_command_keys and alias != self._custom_cmd:
+                    self.livedata.pop(alias, None)
+                    if alias != self._custom_cmd:
                         self.livedata.pop(self._custom_cmd, None)
                 except:
                     pass

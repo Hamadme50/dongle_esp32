@@ -60,9 +60,6 @@ AP_MAXCLI   = 4
 # ---------------------------------------
 inv = None
 
-# One-time cleanup flag for transient POPxx keys
-_pop_transient_keys_once = False
-
 # ---- Custom command (MQTT-triggered) state ----
 _custom_pending = False
 _custom_deadline = 0
@@ -739,53 +736,40 @@ def _scheduled(_):
         pass
     # If a custom command was queued, publish its answer once
     global ANSWER_VAL, _custom_pending, _custom_deadline
+    
     if _custom_pending:
         ans = None
         try:
             if inv and isinstance(inv.livedata, dict):
-                ans = inv.livedata.get(_custom_key)
-        except Exception:
+                ans = getattr(inv, '_custom_answer_cache', None)
+                if not ans:
+                    ans = inv.livedata.get(_custom_key)
+        except:
             ans = None
+
         if ans:
             ANSWER_VAL = str(ans)
             if mqtt_state["ok"]:
-                # remove custom key from LiveData so it only publishes once
-
+                # defensive purge: ensure custom/alias keys are gone before publish
                 try:
-
                     if inv and isinstance(inv.livedata, dict):
-
                         inv.livedata.pop(_custom_key, None)
-
-                except:
-
-                    pass
-
-                # also drop transient POPxx keys on this one-time publish
-
-                try:
-
-                    if inv and isinstance(inv.livedata, dict):
-
                         for _k in list(inv.livedata.keys()):
-
                             if (len(_k)==5 and _k.startswith("POP") and _k[3:].isdigit()):
-
                                 inv.livedata.pop(_k, None)
-
                 except:
-
                     pass
-
-
                 mqtt_pub(TOPIC_BASE + b"/Data", build_json().encode(), False, 0)
             ANSWER_VAL = "0"
+            try:
+                inv._custom_answer_cache = None
+            except:
+                pass
             _custom_pending = False
         elif utime.ticks_diff(now(), _custom_deadline) >= 0:
             _custom_pending = False
 
-
-    # MQTT
+# MQTT
     mqtt_step()
     
     # Status
@@ -841,6 +825,28 @@ def start():
     inv.debug = False 
     inv.start()
     apply_protocols(inv, keep_command_keys=True)
+    # BOOT WARMUP: fetch static+dynamic once (up to ~3s)
+    try:
+        t_dead = utime.ticks_add(now(), 3000)
+        seen_static = False
+        seen_dynamic = False
+        # ensure we start with static
+        inv.request_static = True
+        inv.request_counter = 0
+        while utime.ticks_diff(t_dead, now()) > 0:
+            if inv.step():
+                # heuristic checks
+                try:
+                    seen_static = seen_static or bool(inv.devicedata and len(inv.devicedata))
+                    seen_dynamic = seen_dynamic or bool(inv.livedata and len(inv.livedata))
+                except:
+                    pass
+                if seen_static and seen_dynamic:
+                    break
+            utime.sleep_ms(10)
+    except Exception as _e:
+        log("Warmup skipped:", _e)
+
     
     #print("QPI ->", inv.protocol)
     #print("QPI ->", inv.request_data("QPI"))
