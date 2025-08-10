@@ -339,6 +339,12 @@ class InverterSerial:
             alias = self._custom_name or self._custom_cmd
             if ans not in ('ERCRC','NAK'):
                 self._store_answer(alias, self._custom_cmd, ans, group='dynamic')
+                # prevent raw custom command key from persisting in livedata
+                try:
+                    if self.keep_command_keys and alias != self._custom_cmd:
+                        self.livedata.pop(self._custom_cmd, None)
+                except:
+                    pass
                 self._mark_ok()
                 self.last_live_at = t
             else:

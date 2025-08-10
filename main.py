@@ -60,6 +60,9 @@ AP_MAXCLI   = 4
 # ---------------------------------------
 inv = None
 
+# One-time cleanup flag for transient POPxx keys
+_pop_transient_keys_once = False
+
 # ---- Custom command (MQTT-triggered) state ----
 _custom_pending = False
 _custom_deadline = 0
@@ -746,6 +749,35 @@ def _scheduled(_):
         if ans:
             ANSWER_VAL = str(ans)
             if mqtt_state["ok"]:
+                # remove custom key from LiveData so it only publishes once
+
+                try:
+
+                    if inv and isinstance(inv.livedata, dict):
+
+                        inv.livedata.pop(_custom_key, None)
+
+                except:
+
+                    pass
+
+                # also drop transient POPxx keys on this one-time publish
+
+                try:
+
+                    if inv and isinstance(inv.livedata, dict):
+
+                        for _k in list(inv.livedata.keys()):
+
+                            if (len(_k)==5 and _k.startswith("POP") and _k[3:].isdigit()):
+
+                                inv.livedata.pop(_k, None)
+
+                except:
+
+                    pass
+
+
                 mqtt_pub(TOPIC_BASE + b"/Data", build_json().encode(), False, 0)
             ANSWER_VAL = "0"
             _custom_pending = False
