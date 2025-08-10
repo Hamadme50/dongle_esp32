@@ -31,6 +31,7 @@ MQTT_PORT   = 1883
 MQTT_USER   = "usb"
 MQTT_PASS   = "335500usb"
 TOPIC_BASE  = b"Realtime"      # NO leading slash
+CONTROL_TOPIC = None  # set in start(): Realtime/DeviceControl/<MAC>/Set_Command
 
 SW_VERSION  = "8.9"
 DEV_TYPE    = "L"
@@ -59,6 +60,10 @@ AP_MAXCLI   = 4
 # ---------------------------------------
 inv = None
 
+# ---- Custom command (MQTT-triggered) state ----
+_custom_pending = False
+_custom_deadline = 0
+_custom_key = "ANSWER"
 micropython.alloc_emergency_exception_buf(256)
 def log(*a): print("[LOG]", *a)
 def now(): return utime.ticks_ms()
@@ -202,7 +207,7 @@ wifi_state = {
     "rssi": None,
     "retry_at": 0,
 }
-mqtt_state = {"cli":None,"ok":False,"need":False,"retry_at":0,"cid":mac_hex().encode()}
+mqtt_state = {"cli":None,"ok":False,"need":False,"retry_at":0,"cid":mac_hex().encode(),"sub":False}
 
 _last_ssid = None
 _last_pwd  = None
@@ -523,7 +528,7 @@ def mqtt_step():
         if mqtt_state["ok"]:
             try: mqtt_state["cli"].disconnect()
             except: pass
-        mqtt_state["cli"]=None; mqtt_state["ok"]=False; return
+        mqtt_state["cli"]=None; mqtt_state["ok"]=False; mqtt_state["sub"]=False; return
     if not mqtt_state["ok"] and (mqtt_state["need"] or now()>=mqtt_state["retry_at"]):
         try:
             if mqtt_state["cli"] is None: mqtt_state["cli"]=mqtt_make()
@@ -534,6 +539,15 @@ def mqtt_step():
                 pass
             mqtt_state["cli"].connect()
             mqtt_state["ok"]=True; mqtt_state["need"]=False
+            # attach callback & subscribe control topic
+            try:
+                mqtt_state["cli"].set_callback(mqtt_on_msg)
+                if CONTROL_TOPIC and not mqtt_state.get("sub"):
+                    mqtt_state["cli"].subscribe(CONTROL_TOPIC)
+                    mqtt_state["sub"]=True
+                    log("MQTT subscribed:", CONTROL_TOPIC.decode() if isinstance(CONTROL_TOPIC,(bytes,bytearray)) else str(CONTROL_TOPIC))
+            except Exception as e:
+                log("MQTT subscribe error:", e)
             log("MQTT connected:", MQTT_HOST)
         except:
             mqtt_state["retry_at"]=utime.ticks_add(now(),5000); mqtt_state["ok"]=False; return
@@ -541,7 +555,7 @@ def mqtt_step():
         try:
             mqtt_state["cli"].check_msg()
         except:
-            mqtt_state["ok"]=False; mqtt_state["retry_at"]=utime.ticks_add(now(),3000)
+            mqtt_state["ok"]=False; mqtt_state["sub"]=False; mqtt_state["retry_at"]=utime.ticks_add(now(),3000)
 
 def mqtt_pub(topic, payload, retain=False, qos=0):
     if not mqtt_state["ok"]: return False
@@ -557,6 +571,36 @@ def mqtt_pub(topic, payload, retain=False, qos=0):
         return True
     except:
         mqtt_state["ok"]=False; return False
+
+# --------------- MQTT command callback ---------------
+def mqtt_on_msg(topic, msg):
+    # Control topic: Realtime/DeviceControl/<MAC>/Set_Command
+    try:
+        t = topic.decode() if isinstance(topic, (bytes, bytearray)) else str(topic)
+        m = msg.decode('utf-8','ignore') if isinstance(msg, (bytes, bytearray)) else str(msg)
+        m = m.strip()
+    except Exception:
+        return
+
+    try:
+        ct = CONTROL_TOPIC.decode() if isinstance(CONTROL_TOPIC, (bytes, bytearray)) else str(CONTROL_TOPIC or '')
+    except Exception:
+        ct = ''
+    if not ct or t != ct or not m:
+        return
+
+    global _custom_pending, _custom_deadline
+    if _custom_pending:
+        log("Custom busy; dropped:", m)
+        return
+    try:
+        inv.send_custom(m, name=_custom_key)
+        _custom_pending = True
+        _custom_deadline = utime.ticks_add(now(), 5000)  # 5s timeout
+        log("Custom queued:", m)
+    except Exception as e:
+        log("send_custom error:", e)
+
 
 # --------------- JSON payload ---------------
 def build_json():
@@ -690,6 +734,24 @@ def _scheduled(_):
             _inv_last = now()
     except Exception as _e:
         pass
+    # If a custom command was queued, publish its answer once
+    global ANSWER_VAL, _custom_pending, _custom_deadline
+    if _custom_pending:
+        ans = None
+        try:
+            if inv and isinstance(inv.livedata, dict):
+                ans = inv.livedata.get(_custom_key)
+        except Exception:
+            ans = None
+        if ans:
+            ANSWER_VAL = str(ans)
+            if mqtt_state["ok"]:
+                mqtt_pub(TOPIC_BASE + b"/Data", build_json().encode(), False, 0)
+            ANSWER_VAL = "0"
+            _custom_pending = False
+        elif utime.ticks_diff(now(), _custom_deadline) >= 0:
+            _custom_pending = False
+
 
     # MQTT
     mqtt_step()
@@ -723,6 +785,7 @@ def _tick_cb(_):
 # --------------- Start ----------------------
 def start():
     global _last_ssid, _last_pwd, inv
+    global CONTROL_TOPIC
     log("Boot... MAC:", mac_hex())
 
     s,p = wifi_load()
@@ -737,6 +800,8 @@ def start():
     Timer(0).init(period=T0_MS, mode=Timer.PERIODIC, callback=_tick_cb)
     Timer(1).init(period=PUBLISH_MS, mode=Timer.PERIODIC, callback=_pub_cb)
     log("Timers: T0={}ms (work), T1={}ms (publish)".format(T0_MS, PUBLISH_MS))
+    CONTROL_TOPIC = TOPIC_BASE + b"/DeviceControl/" + mac_hex().encode() + b"/Set_Command"
+    log("Control topic:", CONTROL_TOPIC.decode())
     log("AP SSID (if AP):", ap_ssid())
     
     
