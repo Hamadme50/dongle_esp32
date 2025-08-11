@@ -821,7 +821,7 @@ def start():
     log("AP SSID (if AP):", ap_ssid())
     
     
-    inv = InverterSerial(uart_id=0, rx_pin=20, tx_pin=21, timeout_ms=1500)
+    inv = InverterSerial(uart_id=1, rx_pin=20, tx_pin=21, timeout_ms=1500)
     inv.debug = False 
     inv.start()
     apply_protocols(inv, keep_command_keys=True)
