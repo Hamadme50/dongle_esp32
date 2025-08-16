@@ -21,6 +21,7 @@ LED (GPIO 8 active-low):
 - Wi‑Fi OK, MQTT OK             -> SLOW BLINK (2000 ms)
 """
 import gc, os, network, machine, ubinascii, utime, ujson, usocket, micropython
+import ota_http
 from machine import Pin, Timer
 from serial import InverterSerial
 from protocol_config import apply_protocols
@@ -32,6 +33,7 @@ MQTT_USER   = "usb"
 MQTT_PASS   = "335500usb"
 TOPIC_BASE  = b"Realtime"      # NO leading slash
 CONTROL_TOPIC = None  # set in start(): Realtime/DeviceControl/<MAC>/Set_Command
+UPDATE_TOPIC  = None  # Realtime/DeviceUpdate/<MAC>/Set_Command
 
 SW_VERSION  = "8.9"
 DEV_TYPE    = "L"
@@ -64,6 +66,9 @@ inv = None
 _custom_pending = False
 _custom_deadline = 0
 _custom_key = "ANSWER"
+# OTA state
+_ota_url = None
+_ota_due = False
 micropython.alloc_emergency_exception_buf(256)
 def log(*a): print("[LOG]", *a)
 def now(): return utime.ticks_ms()
@@ -549,6 +554,12 @@ def mqtt_step():
             except Exception as e:
                 log("MQTT subscribe error:", e)
             log("MQTT connected:", MQTT_HOST)
+            try:
+                if UPDATE_TOPIC and not mqtt_state.get("sub_u"):
+                    mqtt_state["cli"].subscribe(UPDATE_TOPIC)
+                    mqtt_state["sub_u"]=True
+            except Exception as e:
+                log("MQTT subscribe(update) error:", e)
         except:
             mqtt_state["retry_at"]=utime.ticks_add(now(),5000); mqtt_state["ok"]=False; return
     if mqtt_state["ok"]:
@@ -586,7 +597,33 @@ def mqtt_on_msg(topic, msg):
         ct = CONTROL_TOPIC.decode() if isinstance(CONTROL_TOPIC, (bytes, bytearray)) else str(CONTROL_TOPIC or '')
     except Exception:
         ct = ''
+    try:
+        ut = UPDATE_TOPIC.decode() if isinstance(UPDATE_TOPIC, (bytes, bytearray)) else str(UPDATE_TOPIC or '')
+    except Exception:
+        ut = ''
+    # ---- NEW: OTA command ----
+
+    if ut and t == ut:
+
+        global _ota_url, _ota_due
+
+        if m.lower().startswith('http://'):
+
+            _ota_url = m
+
+            _ota_due = True
+
+            log('OTA queued:', _ota_url)
+
+        else:
+
+            log('OTA ignored (not http://):', m)
+
+        return
+
+
     if not ct or t != ct or not m:
+
         return
 
     global _custom_pending, _custom_deadline
@@ -646,6 +683,16 @@ def _pub_cb(_):
 
 def _scheduled(_):
     global _busy,_stat_t,_pub_due,_boot_flag,_led_t,_led_on,_last_ssid,_last_pwd,_inv_last
+
+    # Run OTA if requested
+    global _ota_due, _ota_url
+    if _ota_due and _ota_url:
+        _ota_due = False
+        try:
+            log("OTA start:", _ota_url)
+            ota_http.update(_ota_url)
+        except Exception as e:
+            log("OTA error:", e)
 
     # BOOT short press -> clear creds + AP
     if _boot_flag:
@@ -801,8 +848,14 @@ def _tick_cb(_):
 # --------------- Start ----------------------
 def start():
     global _last_ssid, _last_pwd, inv
-    global CONTROL_TOPIC
+    global CONTROL_TOPIC, UPDATE_TOPIC
     log("Boot... MAC:", mac_hex())
+
+    try:
+        from esp32 import Partition
+        Partition.mark_app_valid_cancel_rollback()
+    except Exception:
+        pass
 
     s,p = wifi_load()
     _last_ssid, _last_pwd = s, (p or "")
@@ -818,6 +871,8 @@ def start():
     log("Timers: T0={}ms (work), T1={}ms (publish)".format(T0_MS, PUBLISH_MS))
     CONTROL_TOPIC = TOPIC_BASE + b"/DeviceControl/" + mac_hex().encode() + b"/Set_Command"
     log("Control topic:", CONTROL_TOPIC.decode())
+    UPDATE_TOPIC  = TOPIC_BASE + b"/DeviceUpdate/" + mac_hex().encode() + b"/Set_Command"
+    log("Update  topic:", UPDATE_TOPIC.decode())
     log("AP SSID (if AP):", ap_ssid())
     
     
